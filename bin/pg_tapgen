@@ -6,7 +6,7 @@ use DBI;
 use DBD::Pg;
 use Getopt::Long;
 use File::Spec;
-our $VERSION = '3.32';
+our $VERSION = '3.35';
 
 Getopt::Long::Configure (qw(bundling));
 
@@ -178,6 +178,7 @@ sub has_table {
 );\n\n";
     has_pk($schema, $table);
     columns_are($schema, $table);
+    triggers_are($schema, $table);
 }
 
 sub has_pk {
@@ -221,9 +222,46 @@ sub columns_are {
               "SELECT col_type_is(      '$table', '$col->[0]', '$col->[1]');\n",
               "SELECT $null_fn     '$table', '$col->[0]');\n",
               "SELECT $def_fn'$table', '$col->[0]');\n";
-        print "SELECT col_default_is(   '$table', '$col->[0]', '$col->[4]');\n"
-            if $col->[3];
+        if ($col->[3]) {
+            $col->[4] =~ s/^(.*)::(.*)$/$1/;
+            $col->[4] =~ s/'/''/g;
+            print "SELECT col_default_is(   '$table', '$col->[0]', '$col->[4]');\n";
+        }
         print $/;
+    }
+
+}
+
+sub triggers_are {
+    my ($schema, $table) = @_;
+    print "SET search_path = '$schema';\n";
+    my $triggers = $dbh->selectall_arrayref(q{
+        SELECT t.tgname
+             , c.relname
+             , f.proname
+             , t.tgtype
+          FROM pg_trigger t
+             , pg_class c
+             , pg_proc f
+             , pg_namespace n
+         WHERE c.oid=t.tgrelid
+           AND f.oid = t.tgfoid
+           AND NOT t.tgisinternal
+           AND c.relnamespace = n.oid
+           AND n.nspname = ?
+           AND c.relname = ?
+         ORDER BY t.oid
+    }, undef, $schema, $table);
+
+    return unless $triggers && @{ $triggers };
+    print "SELECT triggers_are('$schema', '$table', ARRAY[\n    '",
+        join("',\n    '", map { $_->[0] } @{ $triggers }),
+        "'\n]);\n\n";
+
+    for my $trigger (@{ $triggers }) {
+
+        print "SELECT has_trigger( '$table', '$trigger->[0]');\n",
+              "SELECT trigger_is(  '$table', '$trigger->[0]', '$trigger->[2]');\n",
     }
 
 }
