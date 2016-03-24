@@ -203,7 +203,8 @@ sub columns_are {
           FROM pg_catalog.pg_namespace n
           JOIN pg_catalog.pg_class c ON n.oid = c.relnamespace
           JOIN pg_catalog.pg_attribute a ON c.oid = a.attrelid
-          LEFT JOIN pg_catalog.pg_attrdef d ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+          LEFT JOIN pg_catalog.pg_attrdef d ON a.attrelid = d.adrelid 
+          AND a.attnum = d.adnum
          WHERE n.nspname = ?
            AND c.relname = ?
            AND a.attnum > 0
@@ -224,8 +225,13 @@ sub columns_are {
               "SELECT $null_fn     '$table', '$col->[0]');\n",
               "SELECT $def_fn'$table', '$col->[0]');\n";
 
-        print "SELECT col_default_is(   '$table', '$col->[0]', $col->[4]);\n"
-            if ($col->[3]);
+        if ($col->[3]) {
+            $_ = $col->[4];
+            s/^(.*)::timestamp(.*)/$1/;
+            #s/^(.*)::(.*)/$1/;
+            s/^''+(.*)''$/'$1'/g;
+            print "SELECT col_default_is(   '$table', '$col->[0]', $_);\n";
+        }
         print $/;
     }
 
