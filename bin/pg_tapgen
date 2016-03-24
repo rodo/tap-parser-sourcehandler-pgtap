@@ -86,7 +86,7 @@ script {
             functions_are($schema);
         }
     }
-} 'schema.sql';
+} 'schema.pg';
 
 ##############################################################################
 
@@ -134,7 +134,7 @@ sub tables_are {
         "'\n]);\n\n";
 
     for my $table (@{ $tables }) {
-        script { has_table($schema, $table) } "table_$schema.$table.sql";
+        script { has_table($schema, $table) } "table_$schema.$table.pg";
     }
 }
 
@@ -297,7 +297,7 @@ pg_tapgen - Generate schema TAP tests from an existing database
 
 =head1 Usage
 
-  pg_tapgen -d template1 > schema_test.sql
+  pg_tapgen -d template1 > schema_test.pg
 
 =head1 Description
 
