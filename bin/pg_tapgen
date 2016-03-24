@@ -202,7 +202,8 @@ sub columns_are {
           FROM pg_catalog.pg_namespace n
           JOIN pg_catalog.pg_class c ON n.oid = c.relnamespace
           JOIN pg_catalog.pg_attribute a ON c.oid = a.attrelid
-          LEFT JOIN pg_catalog.pg_attrdef d ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+          LEFT JOIN pg_catalog.pg_attrdef d ON a.attrelid = d.adrelid
+                                            AND a.attnum = d.adnum
          WHERE n.nspname = ?
            AND c.relname = ?
            AND a.attnum > 0
@@ -258,7 +259,6 @@ sub triggers_are {
         "'\n]);\n\n";
 
     for my $trigger (@{ $triggers }) {
-
         print "SELECT has_trigger( '$table', '$trigger->[0]');\n",
               "SELECT trigger_is(  '$table', '$trigger->[0]', '$trigger->[2]');\n",
     }
