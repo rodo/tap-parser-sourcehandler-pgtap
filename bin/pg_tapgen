@@ -6,12 +6,12 @@ use DBI;
 use DBD::Pg;
 use Getopt::Long;
 use File::Spec;
-our $VERSION = '3.33';
+our $VERSION = '3.35';
+
 
 Getopt::Long::Configure (qw(bundling));
 
-my $opts = { psql => 'psql', directory => '.', create_extension => 1 };
-my $total_tests = 0;
+my $opts = { psql => 'psql', directory => '.' };
 
 Getopt::Long::GetOptions(
     'dbname|d=s'          => \$opts->{dbname},
@@ -20,7 +20,6 @@ Getopt::Long::GetOptions(
     'port|p=s'            => \$opts->{port},
     'exclude-schema|N=s@' => \$opts->{exclude_schema},
     'directory|dir=s'     => \$opts->{directory},
-    'create-extension|c!' => \$opts->{create_extension},
     'verbose|v+'          => \$opts->{verbose},
     'help|H'              => \$opts->{help},
     'man|m'               => \$opts->{man},
@@ -37,7 +36,7 @@ if ( $opts->{help} or $opts->{man} ) {
 }
 
 if ($opts->{version}) {
-    print 'pg_prove ', main->VERSION, "\n";
+    print 'pg_prove ', main->VERSION, $/;
     exit;
 }
 
@@ -45,42 +44,29 @@ if ($opts->{version}) {
 sub script(&;$) {
     my ($code, $fn) = @_;
     my $file = File::Spec->catfile($opts->{directory}, $fn);
-    my $orig_fh = select;
-
-    my $output;
-    open my $str_fh, '>:encoding(UTF-8)', \$output;
-    select $str_fh;
-    my $saved_total_tests = $total_tests;
-    $total_tests = 0;
-    $code->();
-    close $str_fh;
-
     open my $fh, '>:encoding(UTF-8)', $file or die "Cannot open $file: $!\n";
+    my $orig = select;
     select $fh;
-    print "SET client_encoding = 'UTF-8';\n";
-    if ($opts->{create_extension}) {
-        print "SET client_min_messages = warning;\n",
-            "CREATE EXTENSION IF NOT EXISTS pgtap;\n",
-            "RESET client_min_messages;\n\n";
-    }
-    print "BEGIN;\n",
-          "SELECT plan($total_tests);\n\n",
-          $output,
-          "SELECT * FROM finish();\nROLLBACK;\n",
-;
+    print "SET client_encoding = 'UTF-8';\n",
+          "SET client_min_messages = warning;\n",
+          "CREATE EXTENSION IF NOT EXISTS pgtap;\n",
+          "RESET client_min_messages;\n\n",
+          "BEGIN;\n",
+          "SELECT * FROM no_plan();\n\n";
+    $code->();
+    print "SELECT * FROM finish();\nROLLBACK;\n";
     close $fh or die "Error closing $file: $!\n";
-    select $orig_fh;
-    $total_tests = $saved_total_tests;
+    select $orig;
 }
 
 my @conn;
 for (qw(host port dbname)) {
     push @conn, "$_=$opts->{$_}" if defined $opts->{$_};
 }
-my $dsn = 'dbi:Pg:';
-$dsn .= join ';', @conn if @conn;
+my $dsn = 'dbi:Pg';
+$dsn .= ':' . join ';', @conn if @conn;
 
-my $dbh = DBI->connect($dsn, $opts->{username}, $ENV{PGPASSWORD}, {
+my $dbh = DBI->connect($dsn, $opts->{username}, undef, {
     RaiseError     => 1,
     PrintError     => 0,
     AutoCommit     => 1,
@@ -95,14 +81,12 @@ script {
         schemas_are(\@schemas);
         for my $schema (@schemas) {
             tables_are($schema);
-            foreign_tables_are($schema);
             views_are($schema);
-            materialized_views_are($schema);
             sequences_are($schema);
             functions_are($schema);
         }
     }
-} 'schema.sql';
+} 'schema.pg';
 
 ##############################################################################
 
@@ -124,31 +108,11 @@ sub get_schemas {
 
 sub schemas_are {
     my $schemas = shift;
-    return unless @$schemas;
-    my @schemas = @$schemas;
-    no if $] >= 5.017011, warnings => 'experimental::smartmatch';
-    unless ('public' ~~ @schemas ) {
-        push @schemas, 'public';
-    }
     print "SELECT schemas_are(ARRAY[\n    '",
-        join("',\n    '", @schemas),
-        "'\n]);\n\n";
-    $total_tests++;
-    schema_owners($schemas);
+        join("',\n    '", @$schemas),
+        "'\n]);\n\n" if @$schemas;
 }
-sub schema_owners {
-    my $schemas = shift;
-    return unless @$schemas;
-    foreach my $schema ( @$schemas )  {
-      my $owner = $dbh->selectcol_arrayref(q{
-         SELECT pg_catalog.pg_get_userbyid(nspowner)
-         FROM pg_catalog.pg_namespace
-         WHERE nspname = ?;
-      }, undef, $schema)->[0];
-      print "SELECT schema_owner_is('$schema','$owner');\n";
-      $total_tests++;
-    }
-}
+
 sub get_rels {
     my $sth = $dbh->prepare_cached(q{
         SELECT c.relname
@@ -168,16 +132,9 @@ sub tables_are {
     print "SELECT tables_are('$schema', ARRAY[\n    '",
         join("',\n    '", @$tables),
         "'\n]);\n\n";
-    $total_tests++;
 
     for my $table (@{ $tables }) {
-      my $owner = relation_owner($schema, $table);
-      print "SELECT table_owner_is('$schema','$table','$owner','$schema.$table owner is $owner');\n";
-      $total_tests++;
-    }
-
-    for my $table (@{ $tables }) {
-        script { has_table($schema, $table) } "table_$schema.$table.sql";
+        script { has_table($schema, $table) } "table_$schema.$table.pg";
     }
 }
 
@@ -188,47 +145,6 @@ sub views_are {
     print "SELECT views_are('$schema', ARRAY[\n    '",
         join("',\n    '", @$tables),
         "'\n]);\n\n";
-    $total_tests++;
-
-    for my $table (@{ $tables }) {
-      my $owner = relation_owner($schema, $table);
-      print "SELECT view_owner_is('$schema','$table','$owner', '$schema.$table owner is $owner');\n";
-      $total_tests++;
-    }
-}
-
-sub foreign_tables_are {
-    my $schema = shift;
-    my $tables = get_rels(f => $schema);
-    return unless $tables && @{ $tables };
-    print "SELECT foreign_tables_are('$schema', ARRAY[\n    '",
-        join("',\n    '", @$tables),
-        "'\n]);\n\n";
-    $total_tests++;
-    for my $table (@{ $tables }) {
-      my $owner = relation_owner($schema, $table);
-      print "SELECT foreign_table_owner_is('$schema','$table','$owner', '$schema.$table owner is $owner');\n";
-      $total_tests++;
-    }
-
-    for my $table (@{ $tables }) {
-        script { has_foreign_table($schema, $table) } "foreign_table_$schema.$table.sql";
-    }
-}
-
-sub materialized_views_are {
-    my $schema = shift;
-    my $tables = get_rels(m => $schema);
-    return unless $tables && @$tables;
-    print "SELECT materialized_views_are('$schema', ARRAY[\n    '",
-        join("',\n    '", @$tables),
-        "'\n]);\n\n";
-    $total_tests++;
-    for my $table (@{ $tables }) {
-      my $owner = relation_owner($schema, $table);
-      print "SELECT materialized_view_owner_is('$schema','$table','$owner','$schema.$table owner is $owner');\n";
-      $total_tests++;
-    }
 }
 
 sub sequences_are {
@@ -238,12 +154,6 @@ sub sequences_are {
     print "SELECT sequences_are('$schema', ARRAY[\n    '",
         join("',\n    '", @$tables),
         "'\n]);\n\n";
-    $total_tests++;
-    for my $table (@{ $tables }) {
-      my $owner = relation_owner($schema, $table);
-      print "SELECT sequence_owner_is('$schema','$table','$owner','$schema.$table owner is $owner');\n";
-      $total_tests++;
-    }
 }
 
 sub functions_are {
@@ -253,32 +163,12 @@ sub functions_are {
           FROM pg_catalog.pg_proc p
           JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
          WHERE n.nspname = ?
-         ORDER BY p.proname
     });
     my $funcs = $dbh->selectcol_arrayref($sth, undef, $schema);
     return unless $funcs && @$funcs;
     print "SELECT functions_are('$schema', ARRAY[\n    '",
         join("',\n    '", @$funcs),
         "'\n]);\n\n";
-    $total_tests++;
-#
-# debating whether to check full function existance and thus full ownership ornot
-#    for my $func (@{ $funcs }) {
-#      my $owner = function_owner($schema, $func);
-#      print "SELECT function_owner_is('$schema','$func','$owner','$schema.$func owner is $owner');\n";
-#      $total_tests++;
-#    }
-}
-
-sub has_foreign_table {
-    my ($schema, $table) = @_;
-    print "SELECT has_foreign_table(
-    '$schema', '$table',
-    'Should have foreign table $schema.$table'
-);\n\n";
-    $total_tests++;
-    has_pk($schema, $table);
-    columns_are($schema, $table);
 }
 
 sub has_table {
@@ -287,7 +177,6 @@ sub has_table {
     '$schema', '$table',
     'Should have table $schema.$table'
 );\n\n";
-    $total_tests++;
     has_pk($schema, $table);
     columns_are($schema, $table);
     triggers_are($schema, $table);
@@ -296,29 +185,26 @@ sub has_table {
 sub has_pk {
     my ($schema, $table) = @_;
     my $fn = _hasc($schema, $table, 'p') ? 'has_pk' : 'hasnt_pk';
-    print "SELECT $fn(
+    print "select $fn(
     '$schema', '$table',
     'Table $schema.$table should have a primary key'
 );\n\n";
-    $total_tests++;
 }
 
 sub columns_are {
     my ($schema, $table) = @_;
-    # print "SET search_path = '$schema';\n";
+    print "SET search_path = '$schema';\n";
     my $cols = $dbh->selectall_arrayref(q{
         SELECT a.attname AS name
              , pg_catalog.format_type(a.atttypid, a.atttypmod) AS type
              , a.attnotnull AS not_null
              , a.atthasdef  AS has_default
-             , CASE WHEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE '''%'
-                    THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid)
-                    ELSE quote_literal(pg_catalog.pg_get_expr(d.adbin, d.adrelid))
-               END
+             , quote_literal(pg_catalog.pg_get_expr(d.adbin, d.adrelid))
           FROM pg_catalog.pg_namespace n
           JOIN pg_catalog.pg_class c ON n.oid = c.relnamespace
           JOIN pg_catalog.pg_attribute a ON c.oid = a.attrelid
-          LEFT JOIN pg_catalog.pg_attrdef d ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+          LEFT JOIN pg_catalog.pg_attrdef d ON a.attrelid = d.adrelid 
+          AND a.attnum = d.adnum
          WHERE n.nspname = ?
            AND c.relname = ?
            AND a.attnum > 0
@@ -327,62 +213,64 @@ sub columns_are {
     }, undef, $schema, $table);
 
     return unless $cols && @{ $cols };
-    print "SELECT columns_are('$schema'::name, '$table'::name, ARRAY[\n    '",
-        join("'::name,\n    '", map { $_->[0] } @{ $cols }),
-        "'::name\n]);\n\n";
-    $total_tests++;
+    print "SELECT columns_are('$schema', '$table', ARRAY[\n    '",
+        join("',\n    '", map { $_->[0] } @{ $cols }),
+        "'\n]);\n\n";
+
     for my $col (@{ $cols }) {
-        my $desc = 'Column ' . join('.', @{ $dbh->selectcol_arrayref(
-            'SELECT quote_ident(i) FROM unnest(?::text[]) i',
-            undef, [$schema, $table, $col->[0]],
-        ) });
-        my ($null_fn, $null_desc) = $col->[2]
-            ? ('col_not_null(', 'be NOT NULL')
-            : ('col_is_null( ', 'allow NULL');
-        my ($def_fn, $def_desc) = $col->[3]
-            ? ('col_has_default(  ', '')
-            : ('col_hasnt_default(', ' not ');
-        print "SELECT has_column(       '$schema', '$table', '$col->[0]', '$desc should exist');\n",
-            "SELECT col_type_is(      '$schema', '$table', '$col->[0]', '$col->[1]', '$desc should be type $col->[1]');\n",
-            "SELECT $null_fn     '$schema', '$table', '$col->[0]', '$desc should $null_desc');\n",
-            "SELECT $def_fn'$schema', '$table', '$col->[0]', '$desc should${def_desc} have a default');\n";
-        $total_tests = $total_tests + 4;
+        my $null_fn = $col->[2] ? 'col_not_null(' : 'col_is_null( ';
+        my $def_fn = $col->[3] ? 'col_has_default(  ' : 'col_hasnt_default(';
+        print "SELECT has_column(       '$table', '$col->[0]');\n",
+              "SELECT col_type_is(      '$table', '$col->[0]', '$col->[1]');\n",
+              "SELECT $null_fn     '$table', '$col->[0]');\n",
+              "SELECT $def_fn'$table', '$col->[0]');\n";
+
         if ($col->[3]) {
-            print "SELECT col_default_is(   '$schema', '$table', '$col->[0]', $col->[4], '$desc default is');\n";
-            $total_tests++ ;
+            $_ = $col->[4];
+            s/^(.*)::timestamp(.*)/$1/;
+            s/^(.*)::character(.*)/$1/;
+            s/^(.*)::text/$1/;
+            #s/^(.*)::(.*)/$1/;
+            s/^''+(.*)''$/'$1'/g;
+            print "SELECT col_default_is(   '$table', '$col->[0]', $_);\n";
         }
-        print "\n";
+        print $/;
     }
 
 }
 
 sub triggers_are {
     my ($schema, $table) = @_;
+    print "SET search_path = '$schema';\n";
     my $triggers = $dbh->selectall_arrayref(q{
-    SELECT t.tgname, ni.nspname, p.proname
-      FROM pg_catalog.pg_trigger t
-      JOIN pg_catalog.pg_class ct     ON ct.oid = t.tgrelid
-      JOIN pg_catalog.pg_namespace nt ON nt.oid = ct.relnamespace
-      JOIN pg_catalog.pg_proc p       ON p.oid = t.tgfoid
-      JOIN pg_catalog.pg_namespace ni ON ni.oid = p.pronamespace
-     WHERE nt.nspname = ?
-       AND ct.relname = ?
-       AND NOT t.tgisinternal
+        SELECT t.tgname
+             , c.relname
+             , f.proname
+             , t.tgtype
+          FROM pg_trigger t
+             , pg_class c
+             , pg_proc f
+             , pg_namespace n
+         WHERE c.oid=t.tgrelid
+           AND f.oid = t.tgfoid
+           AND NOT t.tgisinternal
+           AND c.relnamespace = n.oid
+           AND n.nspname = ?
+           AND c.relname = ?
+         ORDER BY t.oid
     }, undef, $schema, $table);
 
     return unless $triggers && @{ $triggers };
     print "SELECT triggers_are('$schema', '$table', ARRAY[\n    '",
         join("',\n    '", map { $_->[0] } @{ $triggers }),
         "'\n]);\n\n";
-    $total_tests++;
 
     for my $trigger (@{ $triggers }) {
-        print "SELECT has_trigger( '$schema', '$table', '$trigger->[0]'::name);\n",
-              "SELECT trigger_is(  '$schema', '$table', '$trigger->[0]', '$trigger->[1]', '$trigger->[2]');\n";
-        $total_tests = $total_tests + 2;
+
+        print "SELECT has_trigger( '$table', '$trigger->[0]');\n",
+              "SELECT trigger_is(  '$table', '$trigger->[0]', '$trigger->[2]');\n",
     }
 
-    print "\n";
 }
 
 sub _hasc {
@@ -401,27 +289,6 @@ sub _hasc {
     return $dbh->selectcol_arrayref($sth, undef, @_)->[0];
 }
 
-sub relation_owner {
-    my $sth = $dbh->prepare_cached(q{
-      SELECT pg_catalog.pg_get_userbyid(c.relowner)
-        FROM pg_catalog.pg_class c
-        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = ?
-       AND c.relname =  ?
-    });
-    return $dbh->selectcol_arrayref($sth, undef, @_)->[0];
-}
-sub function_owner {
-    my $sth = $dbh->prepare_cached(q{
-          SELECT pg_catalog.pg_get_userbyid(p.proowner)
-          FROM pg_catalog.pg_proc p
-          JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
-         WHERE n.nspname =  ?
-         and p.proname =  ?
-    });
-    return $dbh->selectcol_arrayref($sth, undef, @_)->[0];
-}
-
 __END__
 
 =encoding utf8
@@ -432,7 +299,7 @@ pg_tapgen - Generate schema TAP tests from an existing database
 
 =head1 Usage
 
-  pg_tapgen -d template1 > schema_test.sql
+  pg_tapgen -d template1 > schema_test.pg
 
 =head1 Description
 
@@ -454,8 +321,6 @@ distribution in the future.
   -p --port PORT            Port to which to connect.
   -v --verbose              Display output of test scripts while running them.
   -N --exclude-schema       Exclude a schema from the generated tests.
-  -c --create-extension     Include CREATE EXTENSION pgtap statement.
-     --no-create-extension  Excluce CREATE EXTENSION pgtap statement.
      --directory DIRECTORY  Directory to which to write the test files.
   -H --help                 Print a usage statement and exit.
   -m --man                  Print the complete documentation and exit.
@@ -484,7 +349,7 @@ C<$PGDATABASE> environment variable or to the system username.
 
 PostgreSQL user name to connect as. Defaults to the value of the C<$PGUSER>
 environment variable or to the operating system name of the user running the
-application. Password can be specified with C<$PGPASSWORD>.
+application.
 
 =item C<-h>
 
@@ -515,19 +380,6 @@ compile time, usually 5432.
 =item C<--directory>
 
 Directory to which to write test files. Defaults to the current directory.
-
-=item C<-c>
-
-=item C<--create-extension>
-
-=item C<--no-create-extension>
-
-  pg_tapgen --create-exension
-  pg_tapgen -c
-  pg_tapgen --no-create-exension
-
-Enable or disable the inclusion of C<CREATE EXTENSION pgtap;> statements in
-the generated test files. Enabled by default.
 
 =item C<-v>
 
@@ -589,6 +441,6 @@ David E. Wheeler <dwheeler@cpan.org>
 
 =head1 Copyright
 
-Copyright (c) 2009-2016 David E. Wheeler. Some Rights Reserved.
+Copyright (c) 2009-2015 David E. Wheeler. Some Rights Reserved.
 
 =cut
